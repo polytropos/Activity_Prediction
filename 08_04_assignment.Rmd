@@ -1,0 +1,105 @@
+---
+title: "Activity Prediction"
+author: "Newton"
+date: "17 Dezember 2017"
+output: html_document
+---
+## Activity Prediction: Assignment in Practical Machine Learning
+
+### Background
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+The training data for this project are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+I use the libraries "tidyverse" for general data manipulation and "caret" for machine learning.
+
+```{r, message = FALSE}
+library(tidyverse)
+library(caret)
+```
+
+### Getting and Cleaning Data
+I download and inspect the data: The raw training data has 19622 observations and 160 variables, the test data 20 observations and also 160 variables. All but the last variable are the same in both data sets. The last variable in training is classe, the outcome for the prediction. The last name in test is problem_id and will not be used. Having seen the data I extended the read.csv() commands to recognize the strings "NA", "", "#DIV/0!" as NA (missing value).
+
+The variable Classe has 5 levels, that are described on the source website as follows:  
+> Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.  
+
+There are ample observations for each Classe level in the training set. Of the 159 potential predictors many don't qualify for sensible usage, because they don't describe the exercise movements (such as row number X, user names, and time stamps) or they have a large portion of missing values (>= 80%). Those variables are excluded and there are 52 predictors left.
+
+```{r}
+# setup urls and files
+url_train ="https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+url_test = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+file_train = "./data/pml-training.csv"
+file_test = "./data/pml-testing.csv"
+
+# create data directory if it doesn't exist
+if (!file.exists("./data")) {
+  dir.create("./data")
+}
+# download files if they don't exist
+if (!file.exists(file_train)) {
+  download.file(url_train, destfile = file_train)
+}
+if (!file.exists(file_test)) {
+  download.file(url_test, destfile = file_test)
+}
+# load and inspect files 
+train <- as_tibble(read.csv("./data/pml-training.csv", na.strings = c("NA", "", "#DIV/0!")))
+test <- as_tibble(read.csv("./data/pml-testing.csv", na.strings = c("NA", "", "#DIV/0!")))
+dim(train)
+dim(test)
+table(train$classe)
+
+# only keep usable predictors
+vars_to_del <- c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window")
+train <- train %>%
+  select(-one_of(vars_to_del)) %>%
+  select_if(~mean(!is.na(.)) > 0.2)
+dim(train)
+```  
+
+### Exploratory Data Analysis
+An important aspect of the exploratory data analysis with respect to prediction are the correlations between the predictors. As there are 53 predictors I don't plot a whole matrix. Instead I calculate the proportion of correlations with an absolute value >0.5 in the upper triangle of the correlation matrix to 7%. This is very low. Then I output the 11 correlations with an absolute value >0.9. They are hints to a potential problem: The measurments include single movements as a total value and three subvalues for each direction (x, y, z). Within those groups there are quite naturally correlations, such as gyros_dumbbell_x to gyros_dumbbell_z or as total_accel_belt to accel_belt_y. As the correlations are overall not pronounced, I don't investigate any further and refrain from further excluding predictors.
+
+```{r}
+# analyze correlations
+cor_matrix <- train %>% select_if(is.numeric) %>% cor()
+flatten_cormat <- function(cormat) {
+  ut <- upper.tri(cormat)
+  out <- data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor = (cormat)[ut]
+  )
+  arrange(out, row, column)
+}
+cor_flat <- flatten_cormat(cor_matrix)
+n_cors_all <- nrow(cor_flat)
+cors_high <- cor_flat %>% filter(abs(cor) > 0.5)
+n_cors_high <- nrow(cors_high)
+n_cors_high / n_cors_all
+(cors_very_high <- cor_flat %>% filter(abs(cor) > 0.9))
+```
+
+### Machine Learning Models
+I use the caret package to build a random forest model that uses OOB validation instead of cross validation. I shortly outline my reasoning: By default, the random forest algorithm in caret creates 500 fully grown trees based on random samples with replacement of the same size as the original data. Because the samples are taken with replacement, on average, for each tree roughly a third of the observations are not used. The prediction accuracy of observation i is only calculated using trees that aren't based on obervation i, meaning on average using 500/3 trees. So, random forest inherently uses a resampling method, that renders an additional cross validation unnecessery. Remember, for example a 5-fold cross validation splits the data into 5 random samples of equal size and performs the train algorithm 5 times, each time leaving one fold out for validation. We don't need to do that if we use random forest with OOB.
+
+Further, by default, caret considers 3 different sizes of random subsets of the predictors at each split in each tree (parameter mtry: all predictors, half of them, and only two). So, in total we have 1500 fully grown trees. The results tell us, that the optimal size of the random subsets of the predictors (mtry) is 27 (half of all possible). So, the final model is calculated with mtry = 27 and has an OOB (out of bag) error rate of only 0.13%. The OOB error rate is a valid estimation of the out of sample error rate, hence the expected error rate for the 20 test observations. So, I expect the test error rate to be <1%, which is quite amazing.
+
+The most important predictors in the final model are num_window, roll_belt, and pitch_forearm.
+
+
+```{r}
+set.seed(777)
+(model <- train(classe ~ ., train,
+               method = "rf",
+               trControl = trainControl(method = "oob")))
+(fm <- model$finalModel)
+var_imp <- as_tibble(rownames_to_column(varImp(fm)))
+var_imp %>% arrange(desc(Overall))
+```
